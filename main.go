@@ -14,7 +14,7 @@
 //   bkup go [--print]        # ALWAYS go to the newest version (does NOT create a new backup)
 //   bkup revert [--print]    # subshell into saved "prev" location
 //   bkup list                # list backups for current project
-//   bkup pull <number> [-q]  # safety-backup current dir, then replace current dir contents with backup <number>
+//   bkup pull [number] [-q]  # safety-backup current dir, then replace current dir contents with backup (default: newest)
 //   bkup clean               # delete backups for current project
 //   bkup cleanse             # delete all project backups under ~/.bkup, keep config.json
 //   bkup config              # open ~/.bkup/config.json in $EDITOR (or vi / notepad)
@@ -206,15 +206,7 @@ func main() {
 		}
 
 	case args[0] == "pull":
-		// bkup pull <number> [-q]
-		if len(args) < 2 {
-			fatal(errors.New("usage: bkup pull <number> [-q]"))
-		}
-		n, err := strconv.Atoi(args[1])
-		if err != nil || n < 0 {
-			fatal(fmt.Errorf("invalid backup number: %q", args[1]))
-		}
-
+		// bkup pull [number] [-q]
 		cwd, err := os.Getwd()
 		if err != nil {
 			fatal(err)
@@ -222,14 +214,40 @@ func main() {
 		cwdAbs := mustAbs(cwd)
 		project := filepath.Base(cwdAbs)
 		projectRoot := filepath.Join(backupRoot, project+"_backup")
-		pullSrc := filepath.Join(projectRoot, fmt.Sprintf("%s_%d", project, n))
 
-		// Ensure requested backup exists BEFORE doing anything else.
-		if fi, err := os.Stat(pullSrc); err != nil || !fi.IsDir() {
+		var n int
+		var pullSrc string
+		if len(args) < 2 {
+			vers, err := listProjectVersions(projectRoot, project)
 			if err != nil {
-				fatal(fmt.Errorf("backup not found: %s (%w)", pullSrc, err))
+				fatal(err)
 			}
-			fatal(fmt.Errorf("backup not found (not a directory): %s", pullSrc))
+			if len(vers) == 0 {
+				fatal(errors.New("no backups found to pull"))
+			}
+			sort.Slice(vers, func(i, j int) bool {
+				// Newest first; tie-breaker: higher N.
+				if vers[i].CreatedUnix == vers[j].CreatedUnix {
+					return vers[i].N > vers[j].N
+				}
+				return vers[i].CreatedUnix > vers[j].CreatedUnix
+			})
+			n = vers[0].N
+			pullSrc = vers[0].Path
+		} else {
+			n, err = strconv.Atoi(args[1])
+			if err != nil || n < 0 {
+				fatal(fmt.Errorf("invalid backup number: %q", args[1]))
+			}
+			pullSrc = filepath.Join(projectRoot, fmt.Sprintf("%s_%d", project, n))
+
+			// Ensure requested backup exists BEFORE doing anything else.
+			if fi, err := os.Stat(pullSrc); err != nil || !fi.IsDir() {
+				if err != nil {
+					fatal(fmt.Errorf("backup not found: %s (%w)", pullSrc, err))
+				}
+				fatal(fmt.Errorf("backup not found (not a directory): %s", pullSrc))
+			}
 		}
 
 		// Never overwrite the backup we're pulling FROM.
@@ -301,9 +319,10 @@ Usage:
   bkup list
       List all backups for the current project.
 
-  bkup pull <number> [-q]
+  bkup pull [number] [-q]
       Safety-backup the current directory (so you can undo), then replace the current
-      directory contents with the chosen backup version. Your current path stays the same.
+      directory contents with the chosen backup version. If no number is provided,
+      the newest backup is used. Your current path stays the same.
       - Default: refuses if max_versions is reached (to avoid data loss).
       - With -q: overwrites the oldest backup (FIFO) to make room.
 
